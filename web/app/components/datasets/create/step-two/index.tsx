@@ -47,7 +47,7 @@ import I18n from '@/context/i18n'
 import { RETRIEVE_METHOD } from '@/types/app'
 import useBreakpoints, { MediaType } from '@/hooks/use-breakpoints'
 import { useDefaultModel, useModelList, useModelListAndDefaultModelAndCurrentProviderAndModel } from '@/app/components/header/account-setting/model-provider-page/hooks'
-import { LanguagesSupported } from '@/i18n/language'
+import { LanguagesSupported } from '@/i18n-config/language'
 import ModelSelector from '@/app/components/header/account-setting/model-provider-page/model-selector'
 import type { DefaultModel } from '@/app/components/header/account-setting/model-provider-page/declarations'
 import { ModelTypeEnum } from '@/app/components/header/account-setting/model-provider-page/declarations'
@@ -62,6 +62,8 @@ import Tooltip from '@/app/components/base/tooltip'
 import CustomDialog from '@/app/components/base/dialog'
 import { PortalToFollowElem, PortalToFollowElemContent, PortalToFollowElemTrigger } from '@/app/components/base/portal-to-follow-elem'
 import { AlertTriangle } from '@/app/components/base/icons/src/vender/solid/alertsAndFeedback'
+import { noop } from 'lodash-es'
+import { useDocLink } from '@/context/i18n'
 
 const TextLabel: FC<PropsWithChildren> = (props) => {
   return <label className='system-sm-semibold text-text-secondary'>{props.children}</label>
@@ -96,7 +98,7 @@ export enum IndexingType {
 }
 
 const DEFAULT_SEGMENT_IDENTIFIER = '\\n\\n'
-const DEFAULT_MAXIMUM_CHUNK_LENGTH = 500
+const DEFAULT_MAXIMUM_CHUNK_LENGTH = 1024
 const DEFAULT_OVERLAP = 50
 const MAXIMUM_CHUNK_TOKEN_LENGTH = Number.parseInt(globalThis.document?.body?.getAttribute('data-public-indexing-max-segmentation-tokens-length') || '4000', 10)
 
@@ -116,11 +118,11 @@ const defaultParentChildConfig: ParentChildConfig = {
   chunkForContext: 'paragraph',
   parent: {
     delimiter: '\\n\\n',
-    maxLength: 500,
+    maxLength: 1024,
   },
   child: {
     delimiter: '\\n',
-    maxLength: 200,
+    maxLength: 512,
   },
 }
 
@@ -145,6 +147,7 @@ const StepTwo = ({
   updateRetrievalMethodCache,
 }: StepTwoProps) => {
   const { t } = useTranslation()
+  const docLink = useDocLink()
   const { locale } = useContext(I18n)
   const media = useBreakpoints()
   const isMobile = media === MediaType.mobile
@@ -158,7 +161,9 @@ const StepTwo = ({
 
   const isInCreatePage = !datasetId || (datasetId && !currentDataset?.data_source_type)
   const dataSourceType = isInCreatePage ? inCreatePageDataSourceType : currentDataset?.data_source_type
-  const [segmentationType, setSegmentationType] = useState<ProcessMode>(ProcessMode.general)
+  const [segmentationType, setSegmentationType] = useState<ProcessMode>(
+    currentDataset?.doc_form === ChunkingMode.parentChild ? ProcessMode.parentChild : ProcessMode.general,
+  )
   const [segmentIdentifier, doSetSegmentIdentifier] = useState(DEFAULT_SEGMENT_IDENTIFIER)
   const setSegmentIdentifier = useCallback((value: string, canEmpty?: boolean) => {
     doSetSegmentIdentifier(value ? escape(value) : (canEmpty ? '' : DEFAULT_SEGMENT_IDENTIFIER))
@@ -169,12 +174,11 @@ const StepTwo = ({
   const [rules, setRules] = useState<PreProcessingRule[]>([])
   const [defaultConfig, setDefaultConfig] = useState<Rules>()
   const hasSetIndexType = !!indexingType
-  const [indexType, setIndexType] = useState<IndexingType>(
-    (indexingType
-      || isAPIKeySet)
-      ? IndexingType.QUALIFIED
-      : IndexingType.ECONOMICAL,
-  )
+  const [indexType, setIndexType] = useState<IndexingType>(() => {
+    if (hasSetIndexType)
+      return indexingType
+    return isAPIKeySet ? IndexingType.QUALIFIED : IndexingType.ECONOMICAL
+  })
 
   const [previewFile, setPreviewFile] = useState<DocumentItem>(
     (datasetId && documentDetail)
@@ -205,7 +209,14 @@ const StepTwo = ({
     }
     if (value === ChunkingMode.parentChild && indexType === IndexingType.ECONOMICAL)
       setIndexType(IndexingType.QUALIFIED)
+
     setDocForm(value)
+
+    if (value === ChunkingMode.parentChild)
+      setSegmentationType(ProcessMode.parentChild)
+    else
+      setSegmentationType(ProcessMode.general)
+
     // eslint-disable-next-line ts/no-use-before-define
     currentEstimateMutation.reset()
   }
@@ -394,7 +405,6 @@ const StepTwo = ({
       score_threshold_enabled: false,
       score_threshold: 0.5,
     })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rerankDefaultModel, isRerankDefaultModelValid])
 
   const getCreationParams = () => {
@@ -421,6 +431,13 @@ const StepTwo = ({
     }
     else { // create
       const indexMethod = getIndexing_technique()
+      if (indexMethod === IndexingType.QUALIFIED && (!embeddingModel.model || !embeddingModel.provider)) {
+        Toast.notify({
+          type: 'error',
+          message: t('appDebug.datasetConfig.embeddingModelRequired'),
+        })
+        return
+      }
       if (
         !isReRankModelSelected({
           rerankModelList,
@@ -489,11 +506,27 @@ const StepTwo = ({
       const separator = rules.segmentation.separator
       const max = rules.segmentation.max_tokens
       const overlap = rules.segmentation.chunk_overlap
+      const isHierarchicalDocument = documentDetail.doc_form === ChunkingMode.parentChild
+                              || (rules.parent_mode && rules.subchunk_segmentation)
       setSegmentIdentifier(separator)
       setMaxChunkLength(max)
       setOverlap(overlap!)
       setRules(rules.pre_processing_rules)
       setDefaultConfig(rules)
+
+      if (isHierarchicalDocument) {
+        setParentChildConfig({
+          chunkForContext: rules.parent_mode || 'paragraph',
+          parent: {
+            delimiter: escape(rules.segmentation.separator),
+            maxLength: rules.segmentation.max_tokens,
+          },
+          child: {
+            delimiter: escape(rules.subchunk_segmentation.separator),
+            maxLength: rules.subchunk_segmentation.max_tokens,
+          },
+        })
+      }
     }
   }
 
@@ -543,6 +576,7 @@ const StepTwo = ({
         onSuccess(data) {
           updateIndexingTypeCache && updateIndexingTypeCache(indexType as string)
           updateResultCache && updateResultCache(data)
+          updateRetrievalMethodCache && updateRetrievalMethodCache(retrievalConfig.search_method as string)
         },
       })
     }
@@ -561,14 +595,12 @@ const StepTwo = ({
       getRulesFromDetail()
       getDefaultMode()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
     // get indexing type by props
     if (indexingType)
       setIndexType(indexingType as IndexingType)
-
     else
       setIndexType(isAPIKeySet ? IndexingType.QUALIFIED : IndexingType.ECONOMICAL)
   }, [isAPIKeySet, indexingType, datasetId])
@@ -617,12 +649,12 @@ const StepTwo = ({
                   onChange={e => setSegmentIdentifier(e.target.value, true)}
                 />
                 <MaxLengthInput
-                  unit='tokens'
+                  unit='characters'
                   value={maxChunkLength}
                   onChange={setMaxChunkLength}
                 />
                 <OverlapInput
-                  unit='tokens'
+                  unit='characters'
                   value={overlap}
                   min={1}
                   onChange={setOverlap}
@@ -750,7 +782,7 @@ const StepTwo = ({
                         })}
                       />
                       <MaxLengthInput
-                        unit='tokens'
+                        unit='characters'
                         value={parentChildConfig.parent.maxLength}
                         onChange={value => setParentChildConfig({
                           ...parentChildConfig,
@@ -797,7 +829,7 @@ const StepTwo = ({
                     })}
                   />
                   <MaxLengthInput
-                    unit='tokens'
+                    unit='characters'
                     value={parentChildConfig.child.maxLength}
                     onChange={value => setParentChildConfig({
                       ...parentChildConfig,
@@ -848,10 +880,9 @@ const StepTwo = ({
               description={t('datasetCreation.stepTwo.qualifiedTip')}
               icon={<Image src={indexMethodIcon.high_quality} alt='' />}
               isActive={!hasSetIndexType && indexType === IndexingType.QUALIFIED}
-              disabled={!isAPIKeySet || hasSetIndexType}
+              disabled={hasSetIndexType}
               onSwitched={() => {
-                if (isAPIKeySet)
-                  setIndexType(IndexingType.QUALIFIED)
+                setIndexType(IndexingType.QUALIFIED)
               }}
             />
           )}
@@ -860,10 +891,10 @@ const StepTwo = ({
             <>
               <CustomDialog show={isQAConfirmDialogOpen} onClose={() => setIsQAConfirmDialogOpen(false)} className='w-[432px]'>
                 <header className='mb-4 pt-6'>
-                  <h2 className='text-lg font-semibold'>
+                  <h2 className='text-lg font-semibold text-text-primary'>
                     {t('datasetCreation.stepTwo.qaSwitchHighQualityTipTitle')}
                   </h2>
-                  <p className='mt-2 text-sm font-normal'>
+                  <p className='mt-2 text-sm font-normal text-text-secondary'>
                     {t('datasetCreation.stepTwo.qaSwitchHighQualityTipContent')}
                   </p>
                 </header>
@@ -894,11 +925,10 @@ const StepTwo = ({
                     description={t('datasetCreation.stepTwo.economicalTip')}
                     icon={<Image src={indexMethodIcon.economical} alt='' />}
                     isActive={!hasSetIndexType && indexType === IndexingType.ECONOMICAL}
-                    disabled={!isAPIKeySet || hasSetIndexType || docForm !== ChunkingMode.text}
+                    disabled={hasSetIndexType || docForm !== ChunkingMode.text}
                     ref={economyDomRef}
                     onSwitched={() => {
-                      if (isAPIKeySet && docForm === ChunkingMode.text)
-                        setIndexType(IndexingType.ECONOMICAL)
+                      setIndexType(IndexingType.ECONOMICAL)
                     }}
                   />
                 </PortalToFollowElemTrigger>
@@ -924,7 +954,7 @@ const StepTwo = ({
           </div>
         )}
         {hasSetIndexType && indexType === IndexingType.ECONOMICAL && (
-          <div className='system-xs-medium mt-2'>
+          <div className='system-xs-medium mt-2 text-text-tertiary'>
             {t('datasetCreation.stepTwo.indexSettingTip')}
             <Link className='text-text-accent' href={`/datasets/${datasetId}/settings`}>{t('datasetCreation.stepTwo.datasetSettingLink')}</Link>
           </div>
@@ -958,7 +988,9 @@ const StepTwo = ({
               <div className={'mb-1'}>
                 <div className='system-md-semibold mb-0.5 text-text-secondary'>{t('datasetSettings.form.retrievalSetting.title')}</div>
                 <div className='body-xs-regular text-text-tertiary'>
-                  <a target='_blank' rel='noopener noreferrer' href='https://docs.dify.ai/guides/knowledge-base/create-knowledge-and-upload-documents#id-4-retrieval-settings' className='text-text-accent'>{t('datasetSettings.form.retrievalSetting.learnMore')}</a>
+                  <a target='_blank' rel='noopener noreferrer'
+                    href={docLink('/guides/knowledge-base/create-knowledge-and-upload-documents')}
+                    className='text-text-accent'>{t('datasetSettings.form.retrievalSetting.learnMore')}</a>
                   {t('datasetSettings.form.retrievalSetting.longDescription')}
                 </div>
               </div>
@@ -1007,7 +1039,7 @@ const StepTwo = ({
             </div>
           )}
       </div>
-      <FloatRightContainer isMobile={isMobile} isOpen={true} onClose={() => { }} footer={null}>
+      <FloatRightContainer isMobile={isMobile} isOpen={true} onClose={noop} footer={null}>
         <PreviewContainer
           header={<PreviewHeader
             title={t('datasetCreation.stepTwo.preview')}
@@ -1122,7 +1154,7 @@ const StepTwo = ({
                       const indexForLabel = index + 1
                       return (
                         <PreviewSlice
-                          key={child}
+                          key={`C-${indexForLabel}-${child}`}
                           label={`C-${indexForLabel}`}
                           text={child}
                           tooltip={`Child-chunk-${indexForLabel} · ${child.length} Characters`}
