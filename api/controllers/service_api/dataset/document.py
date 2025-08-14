@@ -6,15 +6,15 @@ from sqlalchemy import desc, select
 from werkzeug.exceptions import Forbidden, NotFound
 
 import services
-from controllers.common.errors import FilenameNotExistsError
-from controllers.service_api import api
-from controllers.service_api.app.error import (
+from controllers.common.errors import (
+    FilenameNotExistsError,
     FileTooLargeError,
     NoFileUploadedError,
-    ProviderNotInitializeError,
     TooManyFilesError,
     UnsupportedFileTypeError,
 )
+from controllers.service_api import api
+from controllers.service_api.app.error import ProviderNotInitializeError
 from controllers.service_api.dataset.error import (
     ArchivedDocumentImmutableError,
     DocumentIndexingError,
@@ -234,8 +234,6 @@ class DocumentAddByFileApi(DatasetApiResource):
                 args["retrieval_model"].get("reranking_model").get("reranking_model_name"),
             )
 
-        # save file info
-        file = request.files["file"]
         # check file
         if "file" not in request.files:
             raise NoFileUploadedError()
@@ -243,6 +241,8 @@ class DocumentAddByFileApi(DatasetApiResource):
         if len(request.files) > 1:
             raise TooManyFilesError()
 
+        # save file info
+        file = request.files["file"]
         if not file.filename:
             raise FilenameNotExistsError
 

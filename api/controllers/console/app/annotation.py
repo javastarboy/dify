@@ -3,9 +3,8 @@ from flask_login import current_user
 from flask_restful import Resource, marshal, marshal_with, reqparse
 from werkzeug.exceptions import Forbidden
 
+from controllers.common.errors import NoFileUploadedError, TooManyFilesError
 from controllers.console import api
-from controllers.console.app.error import NoFileUploadedError
-from controllers.console.datasets.error import TooManyFilesError
 from controllers.console.wraps import (
     account_initialization_required,
     cloud_edition_billing_resource_check,
@@ -225,14 +224,15 @@ class AnnotationBatchImportApi(Resource):
             raise Forbidden()
 
         app_id = str(app_id)
-        # get file from request
-        file = request.files["file"]
         # check file
         if "file" not in request.files:
             raise NoFileUploadedError()
 
         if len(request.files) > 1:
             raise TooManyFilesError()
+
+        # get file from request
+        file = request.files["file"]
         # check file type
         if not file.filename or not file.filename.lower().endswith(".csv"):
             raise ValueError("Invalid file type. Only CSV files are allowed")
